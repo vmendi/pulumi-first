@@ -5,8 +5,6 @@ import pulumi_awsx as awsx
 import pulumi_docker as docker
 from pulumi_aws import ec2, ecr, ecs, iam, lb, s3
 
-# Create an AWS resource (S3 Bucket)
-bucket = s3.Bucket("my-bucket")
 
 # Create a VPC with public and private subnets across 2 availability zones
 vpc = awsx.ec2.Vpc(
@@ -71,6 +69,24 @@ task_exec_policy_attachment = iam.RolePolicyAttachment(
     "streamlit-task-exec-policy",
     role=task_exec_role.name,
     policy_arn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+)
+
+# Add CloudWatch Logs permissions for log group creation
+cloudwatch_logs_policy = iam.RolePolicy(
+    "streamlit-task-exec-logs-policy",
+    role=task_exec_role.id,
+    policy="""{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*"
+        }]
+    }""",
 )
 
 # Create IAM role for ECS task (application runtime)
@@ -237,7 +253,6 @@ service = ecs.Service(
 )
 
 # Export the name of the bucket
-pulumi.export("bucket_name", bucket.id)
 pulumi.export("vpc_id", vpc.vpc_id)
 pulumi.export("public_subnet_ids", vpc.public_subnet_ids)
 pulumi.export("private_subnet_ids", vpc.private_subnet_ids)

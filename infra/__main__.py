@@ -3,7 +3,7 @@
 import pulumi
 import pulumi_awsx as awsx
 import pulumi_docker as docker
-from pulumi_aws import ec2, ecr, ecs, iam, lb, s3
+from pulumi_aws import acm, ec2, ecr, ecs, iam, lb, route53, s3
 
 
 # Create a VPC with public and private subnets across 2 availability zones
@@ -139,11 +139,38 @@ task_definition = ecs.TaskDefinition(
     ),
 )
 
+# Get the existing Route 53 hosted zone
+zone = route53.get_zone(name="chsandbox.com")
+
+# Request an ACM certificate for the subdomain
+cert = acm.Certificate(
+    "streamlit-cert",
+    domain_name="pulumi-first.chsandbox.com",
+    validation_method="DNS",
+)
+
+# Create DNS validation record for ACM certificate
+cert_validation_record = route53.Record(
+    "cert-validation",
+    zone_id=zone.id,
+    name=cert.domain_validation_options[0].resource_record_name,
+    type=cert.domain_validation_options[0].resource_record_type,
+    records=[cert.domain_validation_options[0].resource_record_value],
+    ttl=60,
+)
+
+# Wait for certificate validation to complete
+cert_validation = acm.CertificateValidation(
+    "cert-validation-completion",
+    certificate_arn=cert.arn,
+    validation_record_fqdns=[cert_validation_record.fqdn],
+)
+
 # Create security group for the load balancer
 alb_security_group = ec2.SecurityGroup(
     "alb-security-group",
     vpc_id=vpc.vpc_id,
-    description="Allow HTTP traffic to load balancer",
+    description="Allow HTTP and HTTPS traffic to load balancer",
     ingress=[
         ec2.SecurityGroupIngressArgs(
             protocol="tcp",
@@ -151,7 +178,14 @@ alb_security_group = ec2.SecurityGroup(
             to_port=80,
             cidr_blocks=["0.0.0.0/0"],
             description="Allow HTTP from anywhere",
-        )
+        ),
+        ec2.SecurityGroupIngressArgs(
+            protocol="tcp",
+            from_port=443,
+            to_port=443,
+            cidr_blocks=["0.0.0.0/0"],
+            description="Allow HTTPS from anywhere",
+        ),
     ],
     egress=[
         ec2.SecurityGroupEgressArgs(
@@ -206,26 +240,47 @@ target_group = lb.TargetGroup(
     vpc_id=vpc.vpc_id,
     health_check=lb.TargetGroupHealthCheckArgs(
         enabled=True,
-        path="/",
+        path="/_stcore/health",  # Use Streamlit's built-in health endpoint
         protocol="HTTP",
         matcher="200",
         interval=30,
-        timeout=5,
+        timeout=10,  # Increased timeout for Streamlit app startup
         healthy_threshold=2,
         unhealthy_threshold=3,
     ),
 )
 
-# Create listener for the load balancer
-listener = lb.Listener(
-    "streamlit-listener",
+# Create HTTPS listener for the load balancer
+https_listener = lb.Listener(
+    "streamlit-https-listener",
+    load_balancer_arn=alb.arn,
+    port=443,
+    protocol="HTTPS",
+    ssl_policy="ELBSecurityPolicy-TLS13-1-2-2021-06",
+    certificate_arn=cert.arn,
+    default_actions=[
+        lb.ListenerDefaultActionArgs(
+            type="forward",
+            target_group_arn=target_group.arn,
+        )
+    ],
+    opts=pulumi.ResourceOptions(depends_on=[cert_validation]),
+)
+
+# Create HTTP listener that redirects to HTTPS
+http_listener = lb.Listener(
+    "streamlit-http-listener",
     load_balancer_arn=alb.arn,
     port=80,
     protocol="HTTP",
     default_actions=[
         lb.ListenerDefaultActionArgs(
-            type="forward",
-            target_group_arn=target_group.arn,
+            type="redirect",
+            redirect=lb.ListenerDefaultActionRedirectArgs(
+                protocol="HTTPS",
+                port="443",
+                status_code="HTTP_301",
+            ),
         )
     ],
 )
@@ -249,12 +304,29 @@ service = ecs.Service(
             container_port=8501,
         )
     ],
-    opts=pulumi.ResourceOptions(depends_on=[listener]),
+    opts=pulumi.ResourceOptions(depends_on=[https_listener]),
 )
 
-# Export the name of the bucket
+# Create DNS A record pointing to the ALB
+app_dns_record = route53.Record(
+    "app-dns",
+    zone_id=zone.id,
+    name="pulumi-first.chsandbox.com",
+    type="A",
+    aliases=[
+        route53.RecordAliasArgs(
+            name=alb.dns_name,
+            zone_id=alb.zone_id,
+            evaluate_target_health=True,
+        )
+    ],
+)
+
+# Export outputs
 pulumi.export("vpc_id", vpc.vpc_id)
 pulumi.export("public_subnet_ids", vpc.public_subnet_ids)
 pulumi.export("private_subnet_ids", vpc.private_subnet_ids)
 pulumi.export("ecr_repository_url", ecr_repo.repository_url)
-pulumi.export("app_url", pulumi.Output.concat("http://", alb.dns_name))
+pulumi.export("alb_dns_name", alb.dns_name)
+pulumi.export("app_url", "https://pulumi-first.chsandbox.com")
+pulumi.export("certificate_arn", cert.arn)

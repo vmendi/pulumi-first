@@ -206,11 +206,11 @@ target_group = lb.TargetGroup(
     vpc_id=vpc.vpc_id,
     health_check=lb.TargetGroupHealthCheckArgs(
         enabled=True,
-        path="/",
+        path="/_stcore/health",  # Use Streamlit's built-in health endpoint
         protocol="HTTP",
         matcher="200",
         interval=30,
-        timeout=5,
+        timeout=10,
         healthy_threshold=2,
         unhealthy_threshold=3,
     ),

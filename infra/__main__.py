@@ -269,7 +269,7 @@ https_listener = lb.Listener(
 
 # Create HTTP listener that redirects to HTTPS
 http_listener = lb.Listener(
-    "streamlit-http-listener",
+    "streamlit-listener",  # Keep same name as old listener to replace it
     load_balancer_arn=alb.arn,
     port=80,
     protocol="HTTP",
